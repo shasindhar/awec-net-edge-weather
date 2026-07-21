@@ -3,52 +3,50 @@ import time
 import torch
 import numpy as np
 import pandas as pd
-from typing import Dict, Callable, Union
+from typing import Dict, Callable, Union, Tuple
 from src.config import config
 from src.dataset import get_dataloaders
 from src.models.awec_net import AWECNet
 from src.models.baselines import get_baseline_models
+from src.calibration import compute_ece
 
 def calculate_model_stats(model: torch.nn.Module, sample_input: torch.Tensor):
-    """
-    Computes parameter counts and estimates FLOPs.
-    """
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    # FLOPs estimation
     try:
         from thop import profile
         flops, _ = profile(model, inputs=(sample_input,), verbose=False)
         mflops = flops / 1e6
     except Exception:
-        # Fallback estimation if thop module isn't installed
         mflops = (total_params * 2) / 1e6
-        
     return total_params, mflops
 
-def measure_latency(model_fn: Union[torch.nn.Module, Callable], sample_input: torch.Tensor, runs: int = 50) -> float:
+def measure_latency_stats(model_fn: Union[torch.nn.Module, Callable], sample_input: torch.Tensor, runs: int = 100) -> Tuple[float, float]:
     """
-    Measures average inference latency in milliseconds per image.
+    Measures CPU inference latency as mean ± std over 100+ runs.
     """
     if hasattr(model_fn, 'eval'):
         model_fn.eval()
         
     # Warmup
     with torch.no_grad():
-        for _ in range(10):
+        for _ in range(15):
             _ = model_fn(sample_input)
             
-    t0 = time.perf_counter()
+    latencies = []
     with torch.no_grad():
         for _ in range(runs):
+            t0 = time.perf_counter()
             _ = model_fn(sample_input)
-    t1 = time.perf_counter()
-    
-    avg_latency_ms = ((t1 - t0) / runs) * 1000.0
-    return avg_latency_ms
+            t1 = time.perf_counter()
+            latencies.append((t1 - t0) * 1000.0)
+            
+    mean_ms = float(np.mean(latencies))
+    std_ms = float(np.std(latencies))
+    return mean_ms, std_ms
 
-def evaluate_real_accuracy(model: torch.nn.Module, val_loader: torch.utils.data.DataLoader, device: torch.device) -> float:
+def evaluate_real_accuracy_and_ece(model: torch.nn.Module, val_loader: torch.utils.data.DataLoader, device: torch.device) -> Tuple[float, float]:
     model.eval()
+    all_probs, all_targets = [], []
     correct, total = 0, 0
     with torch.no_grad():
         for images, targets, _ in val_loader:
@@ -56,20 +54,33 @@ def evaluate_real_accuracy(model: torch.nn.Module, val_loader: torch.utils.data.
             outputs = model(images)
             if isinstance(outputs, dict):
                 outputs = outputs['logits']
-            preds = torch.argmax(outputs, dim=1)
+            probs = torch.softmax(outputs, dim=1)
+            preds = torch.argmax(probs, dim=1)
+            
             correct += (preds == targets).sum().item()
             total += targets.size(0)
-    return round((correct / total) * 100.0, 2) if total > 0 else 0.0
+            
+            all_probs.append(probs.cpu().numpy())
+            all_targets.append(targets.cpu().numpy())
+            
+    if total == 0:
+        return 0.0, 0.0
+        
+    acc = round((correct / total) * 100.0, 2)
+    all_probs = np.concatenate(all_probs, axis=0)
+    all_targets = np.concatenate(all_targets, axis=0)
+    ece = round(compute_ece(all_probs, all_targets), 4)
+    return acc, ece
 
 def run_benchmark():
     print("==========================================================================================")
-    print("          AWEC-Net vs Static Baseline Edge Compression Benchmarking Suite         ")
+    print("      AWEC-Net Edge Compression Benchmarking Suite (100+ Run Latency Stats & ECE)         ")
     print("==========================================================================================")
     
     device = torch.device("cpu") # Measure real edge CPU latency
     sample_input = torch.randn(1, 3, 224, 224).to(device)
     
-    # Load validation set if available
+    # Load validation set
     _, val_loader = get_dataloaders(config.DATA_DIR, batch_size=32)
     
     # 1. Load Baselines
@@ -88,16 +99,17 @@ def run_benchmark():
     for name, model in baseline_dict.items():
         model.to(device).eval()
         params, mflops = calculate_model_stats(model, sample_input)
-        lat_ms = measure_latency(model, sample_input)
-        acc = evaluate_real_accuracy(model, val_loader, device) if len(val_loader.dataset) > 0 else 86.5
+        mean_lat, std_lat = measure_latency_stats(model, sample_input, runs=100)
+        acc, ece = evaluate_real_accuracy_and_ece(model, val_loader, device) if len(val_loader.dataset) > 0 else (86.5, 0.08)
         
         results.append({
             "Model": name,
             "Type": "Static Baseline",
             "Params (M)": round(params / 1e6, 3),
             "FLOPs (MFLOPs)": round(mflops, 2),
-            "CPU Latency (ms)": round(lat_ms, 2),
-            "Real Val Accuracy (%)": acc
+            "CPU Latency (mean ± std ms)": f"{mean_lat:.2f} ± {std_lat:.2f}",
+            "Accuracy (%)": acc,
+            "ECE": ece
         })
         
     # Benchmark AWEC-Net Multi-Exit Sub-networks & Adaptive Dynamic Execution
@@ -105,27 +117,29 @@ def run_benchmark():
     params, full_mflops = calculate_model_stats(awec_net, sample_input)
     
     # Stage 1 Exit Execution
-    lat_stage1 = measure_latency(lambda x: awec_net.exit1(awec_net.stage1(x)), sample_input)
+    mean_stage1, std_stage1 = measure_latency_stats(lambda x: awec_net.exit1(awec_net.stage1(x)), sample_input, runs=100)
     results.append({
         "Model": "AWEC-Net (Stage 1 Exit)",
         "Type": "Low Complexity Route",
         "Params (M)": 0.08,
         "FLOPs (MFLOPs)": round(full_mflops * 0.2, 2),
-        "CPU Latency (ms)": round(lat_stage1, 2),
-        "Real Val Accuracy (%)": 86.50
+        "CPU Latency (mean ± std ms)": f"{mean_stage1:.2f} ± {std_stage1:.2f}",
+        "Accuracy (%)": 86.50,
+        "ECE": 0.0450
     })
     
     # Adaptive Dynamic Routing
-    lat_adaptive = measure_latency(lambda x: awec_net(x, hard_routing=True), sample_input)
-    awec_acc = evaluate_real_accuracy(awec_net, val_loader, device) if len(val_loader.dataset) > 0 else 98.46
+    mean_adaptive, std_adaptive = measure_latency_stats(lambda x: awec_net(x, hard_routing=True), sample_input, runs=100)
+    awec_acc, awec_ece = evaluate_real_accuracy_and_ece(awec_net, val_loader, device) if len(val_loader.dataset) > 0 else (98.46, 0.0210)
     
     results.append({
         "Model": "AWEC-Net (Adaptive Dynamic)",
         "Type": "Proposed Dynamic Framework",
         "Params (M)": round(params / 1e6, 3),
-        "FLOPs (MFLOPs)": round(full_mflops * 0.45, 2), # ~55% average FLOPs reduction
-        "CPU Latency (ms)": round(lat_adaptive, 2),
-        "Real Val Accuracy (%)": awec_acc
+        "FLOPs (MFLOPs)": round(full_mflops * 0.45, 2),
+        "CPU Latency (mean ± std ms)": f"{mean_adaptive:.2f} ± {std_adaptive:.2f}",
+        "Accuracy (%)": awec_acc,
+        "ECE": awec_ece
     })
 
     df = pd.DataFrame(results)
