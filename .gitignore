@@ -3,9 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# PyTorch Checkpoints & Datasets
+# Checkpoints & Logs
 checkpoints/
-data/
 logs/
 *.pth
 *.onnx
