@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch Checkpoints & Datasets
+checkpoints/
+data/
+logs/
+*.pth
+*.onnx
+
+# Environment & IDE
+.venv/
+env/
+venv/
+ENV/
+.vscode/
+.idea/
+.DS_Store
