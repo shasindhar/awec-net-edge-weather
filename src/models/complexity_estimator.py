@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class VisualComplexityEstimator(nn.Module):
-    """
+    r"""
     Lightweight Visual Complexity Estimator G_\phi(x).
     Consists of ultralight depthwise-separable convolutions and a global average pool.
     Input: (B, 3, H, W) weather image tensor

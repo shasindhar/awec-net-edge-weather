@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Tuple
 
 class AWECNetLoss(nn.Module):
-    """
+    r"""
     Dual-Objective Adaptive Compression Loss Function for AWEC-Net.
     
     L_total = L_cls + \lambda_cost * L_cost + \lambda_complexity * L_align

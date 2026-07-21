@@ -21,7 +21,7 @@ class EarlyExitClassifier(nn.Module):
         return self.fc(feat)
 
 class AWECNet(nn.Module):
-    """
+    r"""
     AWEC-Net: Weather-Complexity-Aware Adaptive Compression Neural Network.
     
     Consists of:
