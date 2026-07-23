@@ -71,7 +71,7 @@ def main():
     args = parser.parse_args()
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_loader, val_loader = get_dataloaders(config.DATA_DIR, batch_size=32)
+    train_loader, val_loader = get_dataloaders(config.DATA_DIR, batch_size=32, num_workers=0)
     
     experiments = [
         ("Static Backbone Alone", False, False),

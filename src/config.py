@@ -17,18 +17,22 @@ class Config:
     GATE_HIDDEN_DIM: int = 64
     STAGE_CHANNELS: Tuple[int, int, int] = (16, 48, 96)
     
-    # Adaptive Thresholds for Early Exiting
-    # High confidence exit if max softmax probability > threshold or complexity < complexity threshold
+    # Adaptive Thresholds & Dynamic Routing Config
     EXIT_THRESHOLDS: Tuple[float, float] = (0.85, 0.90)
-    COMPLEXITY_PENALTY_WEIGHT: float = 0.35  # Lambda factor in dual-objective loss
+    COMPLEXITY_BOUNDS: Tuple[float, float] = (0.25, 0.70)  # Low: <0.25, Mid: 0.25-0.70, High: >0.70
+    LAMBDA_ROUTE_WEIGHT: float = 0.40  # Routing alignment loss weight
+    COMPLEXITY_PENALTY_WEIGHT: float = 0.20  # Lambda factor in dual-objective loss
     
-    # Training Config
+    # Training & Regularization Config
     BATCH_SIZE: int = 32
-    NUM_WORKERS: int = 4
+    NUM_WORKERS: int = 0
     EPOCHS: int = 30
     LEARNING_RATE: float = 1e-3
-    WEIGHT_DECAY: float = 1e-4
-    TEMPERATURE: float = 1.0  # Gumbel-softmax temperature annealing
+    WEIGHT_DECAY: float = 1e-3  # Increased weight decay to combat overfitting
+    DROPOUT_RATE: float = 0.3   # Increased dropout rate for classifier heads & backbone
+    PATIENCE: int = 6           # Early stopping patience on validation loss
+    TEMPERATURE: float = 1.0    # Gumbel-softmax initial temperature
+    USE_AMP: bool = True        # Automatic Mixed Precision for faster GPU training
     
     def __post_init__(self):
         if self.CLASSES is None:

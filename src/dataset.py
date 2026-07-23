@@ -92,9 +92,10 @@ class WeatherDataset(Dataset):
     """
     PyTorch Dataset wrapper for Weather Images. Returns image tensor, target label, and visual complexity score.
     """
-    def __init__(self, data_dir: str, transform: Optional[transforms.Compose] = None):
+    def __init__(self, data_dir: str, is_train: bool = True, transform: Optional[transforms.Compose] = None):
         self.data_dir = data_dir
-        self.transform = transform or self.get_default_transforms()
+        self.is_train = is_train
+        self.transform = transform or (self.get_train_transforms() if is_train else self.get_val_transforms())
         self.samples = []
         
         # Discover samples
@@ -105,7 +106,24 @@ class WeatherDataset(Dataset):
                     if fname.lower().endswith(('.png', '.jpg', '.jpeg')):
                         self.samples.append((os.path.join(cls_dir, fname), label_idx))
                         
-    def get_default_transforms(self):
+    def get_train_transforms(self):
+        """
+        Strong data augmentation to prevent overfitting:
+        - RandomResizedCrop
+        - RandomHorizontalFlip
+        - ColorJitter (brightness, contrast, saturation, hue)
+        - RandomGaussianBlur (weather-specific noise/blur augmentation)
+        """
+        return transforms.Compose([
+            transforms.RandomResizedCrop(config.IMAGE_SIZE, scale=(0.8, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0))], p=0.3),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    def get_val_transforms(self):
         return transforms.Compose([
             transforms.Resize(config.IMAGE_SIZE),
             transforms.ToTensor(),
@@ -120,23 +138,28 @@ class WeatherDataset(Dataset):
         img_pil = Image.open(path).convert('RGB')
         
         # Calculate ground truth visual complexity score for dynamic routing analysis
-        # (Use simple heuristic during dataset loading or pre-computed)
         complexity_score = VisualComplexityExtractor.extract_complexity(img_pil)
         
         img_tensor = self.transform(img_pil)
         return img_tensor, label, complexity_score
 
-def get_dataloaders(data_dir: str, batch_size: int = 32, num_workers: int = 2) -> Tuple[DataLoader, DataLoader]:
-    dataset = WeatherDataset(data_dir)
-    if len(dataset) == 0:
+def get_dataloaders(data_dir: str, batch_size: int = 32, num_workers: int = 0) -> Tuple[DataLoader, DataLoader]:
+    full_dataset = WeatherDataset(data_dir, is_train=True)
+    if len(full_dataset) == 0:
         # Generate synthetic data if empty
         SyntheticWeatherDatasetGenerator.generate_synthetic_data(data_dir, samples_per_class=100)
-        dataset = WeatherDataset(data_dir)
+        full_dataset = WeatherDataset(data_dir, is_train=True)
         
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_indices, val_indices = torch.utils.data.random_split(
+        range(len(full_dataset)), [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
     
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train_ds = torch.utils.data.Subset(WeatherDataset(data_dir, is_train=True), train_indices.indices)
+    val_ds = torch.utils.data.Subset(WeatherDataset(data_dir, is_train=False), val_indices.indices)
+    
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     return train_loader, val_loader

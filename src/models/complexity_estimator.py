@@ -61,4 +61,4 @@ class VisualComplexityEstimator(nn.Module):
             else:
                 routing_weights = F.softmax(logits / temperature, dim=-1)
                 
-        return complexity_score, routing_weights
+        return complexity_score, routing_weights, logits

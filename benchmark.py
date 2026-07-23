@@ -81,7 +81,7 @@ def run_benchmark():
     sample_input = torch.randn(1, 3, 224, 224).to(device)
     
     # Load validation set
-    _, val_loader = get_dataloaders(config.DATA_DIR, batch_size=32)
+    _, val_loader = get_dataloaders(config.DATA_DIR, batch_size=32, num_workers=0)
     
     # 1. Load Baselines
     baseline_dict = get_baseline_models(num_classes=config.NUM_CLASSES)
