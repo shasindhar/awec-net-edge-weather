@@ -38,7 +38,7 @@ def train_one_epoch(model, teacher, dataloader, criterion, optimizer, scaler, de
         if teacher is not None:
             with torch.no_grad():
                 if use_amp and device.type == 'cuda':
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         teacher_logits = teacher(images)
                 else:
                     teacher_logits = teacher(images)
@@ -46,7 +46,7 @@ def train_one_epoch(model, teacher, dataloader, criterion, optimizer, scaler, de
         optimizer.zero_grad()
         
         if use_amp and device.type == 'cuda':
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 outputs = model(images, temperature=temp, hard_routing=False)
                 loss, loss_metrics = criterion(outputs, targets, complexity, teacher_logits)
             scaler.scale(loss).backward()
@@ -123,7 +123,7 @@ def main():
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = config.USE_AMP and device.type == 'cuda'
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     
     print(f"[+] Starting AWEC-Net Training on Device: {device} (AMP Enabled: {use_amp})")
     
