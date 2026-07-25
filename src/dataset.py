@@ -9,37 +9,28 @@ from src.config import config
 
 class VisualComplexityExtractor:
     """
-    Computes visual complexity features for input images:
-    - High-frequency edge energy (Laplacian variance)
-    - Spatial intensity gradient magnitude (Sobel energy)
-    - Luminance & Color entropy
-    Returns a normalized complexity score C_ref in [0, 1].
+    Ultrafast visual complexity extractor operating on PIL images:
+    Uses thumbnail downsampling + fast numpy spatial gradient & variance calculations.
+    Returns normalized visual complexity score C_ref in [0, 1].
     """
     @staticmethod
     def extract_complexity(img_pil: Image.Image) -> float:
-        # Convert image to grayscale numpy array
-        gray = np.array(img_pil.convert('L'), dtype=np.float32)
+        # Downsample to 64x64 thumbnail for 100x speedup
+        gray_thumb = img_pil.convert('L').resize((64, 64), Image.Resampling.BILINEAR)
+        arr = np.array(gray_thumb, dtype=np.float32)
         
-        # 1. Edge Energy (Laplacian variance)
-        # Approximate 3x3 Laplacian filter kernel
-        laplacian_kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)
-        from scipy.ndimage import convolve
-        lap_resp = convolve(gray, laplacian_kernel)
-        lap_var = float(np.var(lap_resp))
+        # Spatial gradients
+        dx = np.abs(arr[:, 1:] - arr[:, :-1])
+        dy = np.abs(arr[1:, :] - arr[:-1, :])
+        grad_val = float(np.mean(dx) + np.mean(dy))
         
-        # 2. Intensity Gradient Energy (Sobel)
-        sobel_x = convolve(gray, np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32))
-        sobel_y = convolve(gray, np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32))
-        grad_mag = np.mean(np.sqrt(sobel_x**2 + sobel_y**2))
+        # Global variance
+        var_val = float(np.var(arr))
         
-        # 3. Spatial Entropy
-        hist, _ = np.histogram(gray, bins=32, range=(0, 256), density=True)
-        hist = hist[hist > 0]
-        entropy = -np.sum(hist * np.log2(hist))
-        
-        # Normalize and composite score in [0.0, 1.0]
-        score = 0.4 * min(lap_var / 1500.0, 1.0) + 0.4 * min(grad_mag / 80.0, 1.0) + 0.2 * (entropy / 5.0)
+        # Normalized score in [0.0, 1.0]
+        score = 0.5 * min(grad_val / 35.0, 1.0) + 0.5 * min(var_val / 2200.0, 1.0)
         return float(np.clip(score, 0.0, 1.0))
+
 
 class SyntheticWeatherDatasetGenerator:
     """
