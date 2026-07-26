@@ -5,14 +5,14 @@ from typing import Tuple, Dict
 
 class AWECNetLoss(nn.Module):
     r"""
-    Dual-Objective Adaptive Compression Loss Function with Knowledge Distillation (KD)
-    and Visual Complexity Target Routing Alignment.
+    Dual-Objective Adaptive Compression Loss Function with Knowledge Distillation (KD),
+    Label Smoothing for reduced validation error, and Visual Complexity Target Routing Alignment.
     
     L_total = L_cls + \alpha_kd * L_kd + \lambda_route * L_route + \lambda_align * L_align
     """
-    def __init__(self, stage_costs: Tuple[float, float, float] = (0.2, 0.5, 1.0), lambda_route: float = 0.40, lambda_align: float = 0.15, alpha_kd: float = 0.4, kd_temperature: float = 3.0):
+    def __init__(self, stage_costs: Tuple[float, float, float] = (0.2, 0.5, 1.0), lambda_route: float = 0.30, lambda_align: float = 0.15, alpha_kd: float = 0.4, kd_temperature: float = 3.0, label_smoothing: float = 0.05):
         super(AWECNetLoss, self).__init__()
-        self.ce = nn.CrossEntropyLoss()
+        self.ce = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
         self.mse = nn.MSELoss()
         self.kld = nn.KLDivLoss(reduction='batchmean')
         self.register_buffer('stage_costs', torch.tensor(stage_costs, dtype=torch.float32))
@@ -22,13 +22,13 @@ class AWECNetLoss(nn.Module):
         self.kd_temperature = kd_temperature
 
     def forward(self, outputs: Dict[str, torch.Tensor], targets: torch.Tensor, ground_truth_complexity: torch.Tensor, teacher_logits: torch.Tensor = None) -> Tuple[torch.Tensor, dict]:
-        # 1. Multi-exit Classification Loss
+        # 1. Multi-exit Classification Loss with Balanced Exit Loss Weighting
         l1 = self.ce(outputs['out1'], targets)
         l2 = self.ce(outputs['out2'], targets)
         l3 = self.ce(outputs['out3'], targets)
         l_adaptive = self.ce(outputs['logits'], targets)
         
-        l_cls = l_adaptive + 0.3 * (l1 + l2 + l3)
+        l_cls = l_adaptive + 0.35 * l1 + 0.35 * l2 + 0.35 * l3
         
         # 2. Knowledge Distillation Loss (if teacher logits provided)
         l_kd = torch.tensor(0.0, device=targets.device)
@@ -42,7 +42,6 @@ class AWECNetLoss(nn.Module):
             l_kd = (kd1 + kd2 + kd3) / 3.0
             
         # 3. Explicit Complexity Target Routing Alignment Loss
-        # Maps C(x) to target exit stages: <0.25 -> Stage 1, 0.25-0.70 -> Stage 2, >0.70 -> Stage 3
         gt_comp = ground_truth_complexity.view(-1).float()
         target_stage = torch.where(gt_comp < 0.25, 0, torch.where(gt_comp <= 0.70, 1, 2)).to(targets.device)
         l_route = self.ce(outputs['gate_logits'], target_stage)
