@@ -139,7 +139,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=config.BATCH_SIZE, help="Batch size")
     parser.add_argument("--lr", type=float, default=config.LEARNING_RATE, help="Learning rate")
     parser.add_argument("--use_kd", action="store_true", help="Enable Knowledge Distillation from ResNet50 Teacher")
-    parser.add_argument("--num_workers", type=int, default=2, help="Number of DataLoader workers")
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader workers (0 for Windows/Colab compatibility)")
     parser.add_argument("--patience", type=int, default=config.PATIENCE, help="Early stopping patience on val loss")
     args = parser.parse_args()
     

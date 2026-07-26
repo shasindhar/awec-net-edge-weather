@@ -31,7 +31,6 @@ class VisualComplexityExtractor:
         score = 0.5 * min(grad_val / 35.0, 1.0) + 0.5 * min(var_val / 2200.0, 1.0)
         return float(np.clip(score, 0.0, 1.0))
 
-
 class SyntheticWeatherDatasetGenerator:
     """
     Generates synthetic benchmark weather images with explicit visual complexity variances

@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple, Optional
-import torchvision.models as models
 from src.models.complexity_estimator import VisualComplexityEstimator
 
 class EarlyExitClassifier(nn.Module):
@@ -38,20 +37,28 @@ class AWECNet(nn.Module):
         # 1. Complexity Estimator
         self.estimator = VisualComplexityEstimator(num_exits=3)
         
+        # 2. Backbone Stages (Pretrained MobileNetV3 Feature Transfer Learning)
+        is_pretrained_loaded = False
         if pretrained:
             try:
-                weights = models.MobileNet_V3_Small_Weights.DEFAULT
-                base_model = models.mobilenet_v3_small(weights=weights)
+                import torchvision.models as models
+                try:
+                    weights = models.MobileNet_V3_Small_Weights.DEFAULT
+                    base_model = models.mobilenet_v3_small(weights=weights)
+                except Exception:
+                    base_model = models.mobilenet_v3_small(pretrained=True)
+                    
+                feats = base_model.features
+                self.stage1 = feats[0:3]   # Stage 1 Exit (24 channels)
+                self.stage2 = feats[3:8]   # Stage 2 Exit (48 channels)
+                self.stage3 = feats[8:13]  # Stage 3 Exit (576 channels)
+                c1, c2, c3 = 24, 48, 576
+                is_pretrained_loaded = True
             except Exception:
-                base_model = models.mobilenet_v3_small(pretrained=True)
-                
-            feats = base_model.features
-            self.stage1 = feats[0:3]   # Output: 24 channels
-            self.stage2 = feats[3:8]   # Output: 48 channels
-            self.stage3 = feats[8:13]  # Output: 576 channels
-            c1, c2, c3 = 24, 48, 576
-        else:
-            c1, c2, c3 = embed_dims
+                is_pretrained_loaded = False
+
+        if not is_pretrained_loaded:
+            c1, c2, c3 = (24, 48, 96)
             self.stage1 = nn.Sequential(
                 nn.Conv2d(3, c1, kernel_size=3, stride=2, padding=1, bias=False),
                 nn.BatchNorm2d(c1),
