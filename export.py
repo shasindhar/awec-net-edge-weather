@@ -3,6 +3,7 @@ import sys
 import subprocess
 import torch
 import torch.nn as nn
+from typing import Dict, Tuple, Optional, List
 from src.config import config
 from src.models.awec_net import AWECNet
 
@@ -16,11 +17,18 @@ class AWECNetONNXExportWrapper(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         outputs = self.model(x, hard_routing=True)
         return outputs['logits'], outputs['complexity_score'], outputs['routing_weights']
 
-def safe_onnx_export(model, dummy_input, export_path, input_names, output_names, dynamic_axes):
+def safe_onnx_export(
+    model: nn.Module,
+    dummy_input: torch.Tensor,
+    export_path: str,
+    input_names: List[str],
+    output_names: List[str],
+    dynamic_axes: Dict[str, Dict[int, str]]
+) -> None:
     """
     Robust ONNX exporter compatible with PyTorch 2.x, Python 3.12, and ONNX Runtime.
     Uses opset 13 to avoid version_converter assertion failures.
@@ -38,14 +46,14 @@ def safe_onnx_export(model, dummy_input, export_path, input_names, output_names,
         torch.onnx.export(model, dummy_input, export_path, **kwargs)
         return
     except Exception as e:
-        print(f"  [!] Standard ONNX export encountered note ({e}). Retrying with legacy TorchScript backend...")
+        print(f"  [!] Standard ONNX export note ({e}). Retrying with legacy TorchScript backend...")
         try:
             torch.onnx.export(model, dummy_input, export_path, dynamo=False, **kwargs)
         except Exception as e2:
             print(f"  [!] Fallback export failed: {e2}")
             torch.onnx.export(model, dummy_input, export_path, **kwargs)
 
-def export_to_onnx(output_dir: str = "./checkpoints/onnx"):
+def export_to_onnx(output_dir: str = "./checkpoints/onnx") -> None:
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cpu")
 
