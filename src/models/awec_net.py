@@ -23,81 +23,70 @@ class EarlyExitClassifier(nn.Module):
 class AWECNet(nn.Module):
     r"""
     AWEC-Net: Weather-Complexity-Aware Adaptive Compression Neural Network.
-    High-Performance Edition with Pretrained MobileNetV3-Large Backbone (>97% Accuracy Target).
+    Target Benchmark Edition (98.46% Val Accuracy Target).
     
     Consists of:
     1. G_\phi: Ultralight Visual Complexity Estimator
-    2. Stage 1 (Fast Exit for clear sunny / low complexity images)
-    3. Stage 2 (Medium Exit for moderate overcast images)
-    4. Stage 3 (Deep Backbone for high complexity / fog / rain / snow images)
+    2. Stage 1 (Fast Exit for clear sunny / low complexity images, 64 ch)
+    3. Stage 2 (Medium Exit for moderate overcast images, 256 ch)
+    4. Stage 3 (Deep Backbone for high complexity / fog / rain / snow images, 512 ch)
     """
-    def __init__(self, num_classes: int = 5, pretrained: bool = True, backbone_type: str = "large", dropout_rate: float = 0.2):
+    def __init__(self, num_classes: int = 5, pretrained: bool = True, backbone_type: str = "resnet34", dropout_rate: float = 0.2):
         super(AWECNet, self).__init__()
         self.num_classes = num_classes
         
         # 1. Complexity Estimator
         self.estimator = VisualComplexityEstimator(num_exits=3)
         
-        # 2. Backbone Stages (High-Capacity Pretrained Feature Extractor)
+        # 2. Backbone Stages (ResNet34 / MobileNet Multi-Stage Feature Backbone)
         is_pretrained_loaded = False
         if pretrained:
             try:
                 import torchvision.models as models
-                if backbone_type == "large":
+                if backbone_type == "resnet34":
                     try:
-                        weights = models.MobileNet_V3_Large_Weights.DEFAULT
-                        base_model = models.mobilenet_v3_large(weights=weights)
+                        base = models.resnet34(weights=models.ResNet34_Weights.DEFAULT)
                     except Exception:
-                        base_model = models.mobilenet_v3_large(pretrained=True)
-                    feats = base_model.features
-                    self.stage1 = feats[0:4]   # Stage 1 (24 channels)
-                    self.stage2 = feats[4:7]   # Stage 2 (40 channels)
-                    self.stage3 = feats[7:]    # Stage 3 (960 channels)
+                        base = models.resnet34(pretrained=True)
+                    
+                    self.stage1 = nn.Sequential(base.conv1, base.bn1, base.relu, base.maxpool, base.layer1) # 64 ch
+                    self.stage2 = nn.Sequential(base.layer2, base.layer3)                                  # 256 ch
+                    self.stage3 = nn.Sequential(base.layer4)                                                # 512 ch
+                    c1, c2, c3 = 64, 256, 512
                 else:
                     try:
-                        weights = models.MobileNet_V3_Small_Weights.DEFAULT
-                        base_model = models.mobilenet_v3_small(weights=weights)
+                        base = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.DEFAULT)
                     except Exception:
-                        base_model = models.mobilenet_v3_small(pretrained=True)
-                    feats = base_model.features
-                    self.stage1 = feats[0:3]   # Stage 1 (24 channels)
-                    self.stage2 = feats[3:8]   # Stage 2 (48 channels)
-                    self.stage3 = feats[8:]    # Stage 3 (576 channels)
+                        base = models.mobilenet_v3_large(pretrained=True)
+                    feats = base.features
+                    self.stage1 = feats[0:4]
+                    self.stage2 = feats[4:7]
+                    self.stage3 = feats[7:]
+                    c1, c2, c3 = 24, 40, 960
                 is_pretrained_loaded = True
             except Exception:
                 is_pretrained_loaded = False
 
         if not is_pretrained_loaded:
-            c1_fallback, c2_fallback, c3_fallback = (24, 48, 96)
+            c1, c2, c3 = (64, 256, 512)
             self.stage1 = nn.Sequential(
-                nn.Conv2d(3, c1_fallback, kernel_size=3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(c1_fallback),
-                nn.Hardswish(inplace=True),
-                nn.Conv2d(c1_fallback, c1_fallback, kernel_size=3, stride=2, padding=1, groups=c1_fallback, bias=False),
-                nn.BatchNorm2d(c1_fallback),
-                nn.Hardswish(inplace=True),
-                nn.Dropout2d(0.1)
+                nn.Conv2d(3, c1, kernel_size=7, stride=2, padding=3, bias=False),
+                nn.BatchNorm2d(c1),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
             )
             self.stage2 = nn.Sequential(
-                nn.Conv2d(c1_fallback, c2_fallback, kernel_size=3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(c2_fallback),
-                nn.Hardswish(inplace=True),
-                nn.Conv2d(c2_fallback, c2_fallback, kernel_size=3, stride=1, padding=1, groups=c2_fallback, bias=False),
-                nn.BatchNorm2d(c2_fallback),
-                nn.Hardswish(inplace=True),
-                nn.Dropout2d(0.15)
+                nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(c2),
+                nn.ReLU(inplace=True)
             )
             self.stage3 = nn.Sequential(
-                nn.Conv2d(c2_fallback, c3_fallback, kernel_size=3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(c3_fallback),
-                nn.Hardswish(inplace=True),
-                nn.Conv2d(c3_fallback, c3_fallback, kernel_size=3, stride=1, padding=1, groups=c3_fallback, bias=False),
-                nn.BatchNorm2d(c3_fallback),
-                nn.Hardswish(inplace=True),
-                nn.Dropout2d(0.2)
+                nn.Conv2d(c2, c3, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(c3),
+                nn.ReLU(inplace=True)
             )
 
-        # Dynamic channel shape detection to guarantee 100% mat1 / mat2 dimension matching
+        # Dynamic channel shape detection to guarantee 100% matrix shape matching
         with torch.no_grad():
             dummy = torch.randn(1, 3, 224, 224)
             f1 = self.stage1(dummy)
