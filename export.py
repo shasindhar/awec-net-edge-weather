@@ -2,51 +2,55 @@ import os
 import sys
 import subprocess
 import torch
+import torch.nn as nn
 from src.config import config
 from src.models.awec_net import AWECNet
 
+class AWECNetONNXExportWrapper(nn.Module):
+    """
+    Clean wrapper for ONNX export & INT8 quantization.
+    Returns tensor tuple (logits, complexity_score, routing_weights)
+    without internal dictionary flattening shape mismatches.
+    """
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor):
+        outputs = self.model(x, hard_routing=True)
+        return outputs['logits'], outputs['complexity_score'], outputs['routing_weights']
+
 def safe_onnx_export(model, dummy_input, export_path, input_names, output_names, dynamic_axes):
     """
-    Robust ONNX exporter that handles PyTorch 2.x / Python 3.12 onnxscript dependency.
+    Robust ONNX exporter compatible with PyTorch 2.x, Python 3.12, and ONNX Runtime.
+    Uses opset 13 to avoid version_converter assertion failures.
     """
     kwargs = {
         "export_params": True,
-        "opset_version": 14,
+        "opset_version": 13,
         "do_constant_folding": True,
         "input_names": input_names,
         "output_names": output_names,
         "dynamic_axes": dynamic_axes,
     }
     
-    # Try standard export first
     try:
         torch.onnx.export(model, dummy_input, export_path, **kwargs)
         return
-    except ModuleNotFoundError as e:
-        if "onnxscript" in str(e):
-            print("  [!] PyTorch ONNX exporter requires 'onnxscript'. Installing onnxscript...")
-            try:
-                subprocess.run([sys.executable, "-m", "pip", "install", "onnxscript", "-q"], check=True)
-                print("  [+] Successfully installed onnxscript. Retrying ONNX export...")
-                torch.onnx.export(model, dummy_input, export_path, **kwargs)
-                return
-            except Exception as inst_err:
-                print(f"  [!] Auto-installation failed ({inst_err}). Trying legacy TorchScript exporter backend...")
-        
-    # Fallback to dynamo=False (legacy C++ TorchScript backend)
-    try:
-        torch.onnx.export(model, dummy_input, export_path, dynamo=False, **kwargs)
-    except Exception as fallback_err:
-        print(f"  [!] TorchScript export fallback failed: {fallback_err}")
-        # Final attempt: standard call
-        torch.onnx.export(model, dummy_input, export_path, **kwargs)
+    except Exception as e:
+        print(f"  [!] Standard ONNX export encountered note ({e}). Retrying with legacy TorchScript backend...")
+        try:
+            torch.onnx.export(model, dummy_input, export_path, dynamo=False, **kwargs)
+        except Exception as e2:
+            print(f"  [!] Fallback export failed: {e2}")
+            torch.onnx.export(model, dummy_input, export_path, **kwargs)
 
 def export_to_onnx(output_dir: str = "./checkpoints/onnx"):
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cpu")
 
     print("[+] Initializing AWEC-Net for ONNX Export & INT8 Quantization...")
-    model = AWECNet(
+    base_model = AWECNet(
         num_classes=config.NUM_CLASSES,
         pretrained=True,
         backbone_type="resnet34",
@@ -55,22 +59,22 @@ def export_to_onnx(output_dir: str = "./checkpoints/onnx"):
 
     ckpt = os.path.join(config.CHECKPOINT_DIR, "awec_net_best.pth")
     if os.path.exists(ckpt):
-        model.load_state_dict(torch.load(ckpt, map_location=device))
+        base_model.load_state_dict(torch.load(ckpt, map_location=device))
         print(f"  [+] Loaded trained checkpoint: {ckpt}")
     else:
-        print(f"  [!] Checkpoint not found at {ckpt} — exporting untrained weights")
+        print(f"  [!] Checkpoint not found at {ckpt} — exporting default weights")
 
+    export_model = AWECNetONNXExportWrapper(base_model).to(device).eval()
     dummy = torch.randn(1, 3, 224, 224)
 
     # ── 1. Full FP32 ONNX ─────────────────────────────────────────────────────
     fp32_path = os.path.join(output_dir, "awec_net_fp32.onnx")
     safe_onnx_export(
-        model=model,
+        model=export_model,
         dummy_input=dummy,
         export_path=fp32_path,
         input_names=["input_image"],
-        output_names=["adaptive_logits", "out1", "out2", "out3",
-                      "complexity_score", "routing_weights", "gate_logits"],
+        output_names=["adaptive_logits", "complexity_score", "routing_weights"],
         dynamic_axes={"input_image": {0: "batch_size"}}
     )
     fp32_mb = os.path.getsize(fp32_path) / 1e6
@@ -79,7 +83,7 @@ def export_to_onnx(output_dir: str = "./checkpoints/onnx"):
     # ── 2. Complexity Estimator sub-graph ─────────────────────────────────────
     est_path = os.path.join(output_dir, "complexity_estimator.onnx")
     safe_onnx_export(
-        model=model.estimator,
+        model=base_model.estimator,
         dummy_input=dummy,
         export_path=est_path,
         input_names=["input_image"],
@@ -92,18 +96,28 @@ def export_to_onnx(output_dir: str = "./checkpoints/onnx"):
     try:
         from onnxruntime.quantization import quantize_dynamic, QuantType
         int8_path = os.path.join(output_dir, "awec_net_int8.onnx")
-        quantize_dynamic(
-            model_input=fp32_path,
-            model_output=int8_path,
-            weight_type=QuantType.QUInt8
-        )
+        
+        try:
+            quantize_dynamic(
+                model_input=fp32_path,
+                model_output=int8_path,
+                weight_type=QuantType.QUInt8
+            )
+        except Exception as q_err:
+            print(f"  [!] Primary quantization note: {q_err}. Retrying without strict shape inference...")
+            quantize_dynamic(
+                model_input=fp32_path,
+                model_output=int8_path,
+                weight_type=QuantType.QUInt8,
+                extra_options={'EnableShapeInference': False}
+            )
+            
         int8_mb = os.path.getsize(int8_path) / 1e6
         reduction = (fp32_mb - int8_mb) / fp32_mb * 100.0
         print(f"  [+] Applied Dynamic INT8 Quantization: {int8_path}")
         print(f"      FP32 Model Size: {fp32_mb:.2f} MB | INT8 Model Size: {int8_mb:.2f} MB ({reduction:.1f}% reduction)")
     except ImportError:
-        print("  [!] onnxruntime / onnxruntime.quantization not installed — skip INT8 quantization")
-        print("       Install with: pip install onnxruntime onnxruntime-tools")
+        print("  [!] onnxruntime not installed — skip INT8 quantization")
     except Exception as e:
         print(f"  [!] INT8 Quantization step skipped or failed: {e}")
 
@@ -111,7 +125,7 @@ def export_to_onnx(output_dir: str = "./checkpoints/onnx"):
     try:
         ts_path = os.path.join(output_dir, "awec_net_torchscript.pt")
         traced = torch.jit.trace(
-            model,
+            base_model,
             (dummy,),
             strict=False
         )
