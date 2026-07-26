@@ -8,7 +8,7 @@ class EarlyExitClassifier(nn.Module):
     """
     Lightweight classification head attached to intermediate backbone stages.
     """
-    def __init__(self, in_channels: int, num_classes: int, dropout_rate: float = 0.3):
+    def __init__(self, in_channels: int, num_classes: int, dropout_rate: float = 0.2):
         super(EarlyExitClassifier, self).__init__()
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Sequential(
@@ -23,36 +23,48 @@ class EarlyExitClassifier(nn.Module):
 class AWECNet(nn.Module):
     r"""
     AWEC-Net: Weather-Complexity-Aware Adaptive Compression Neural Network.
+    High-Performance Edition with Pretrained MobileNetV3-Large Backbone (>97% Accuracy Target).
     
     Consists of:
     1. G_\phi: Ultralight Visual Complexity Estimator
-    2. Stage 1 (Fast Exit for low visual complexity/clear sunny images)
-    3. Stage 2 (Medium Exit for moderate visual complexity images)
-    4. Stage 3 (Full Backbone for high complexity/foggy/blurry/snowy images)
+    2. Stage 1 (Fast Exit for clear sunny / low complexity images)
+    3. Stage 2 (Medium Exit for moderate overcast images)
+    4. Stage 3 (Deep Backbone for high complexity / fog / rain / snow images)
     """
-    def __init__(self, num_classes: int = 5, pretrained: bool = True, embed_dims: Tuple[int, int, int] = (24, 48, 576), dropout_rate: float = 0.3):
+    def __init__(self, num_classes: int = 5, pretrained: bool = True, backbone_type: str = "large", dropout_rate: float = 0.2):
         super(AWECNet, self).__init__()
         self.num_classes = num_classes
         
         # 1. Complexity Estimator
         self.estimator = VisualComplexityEstimator(num_exits=3)
         
-        # 2. Backbone Stages (Pretrained MobileNetV3 Feature Transfer Learning)
+        # 2. Backbone Stages (High-Capacity Pretrained Feature Extractor)
         is_pretrained_loaded = False
         if pretrained:
             try:
                 import torchvision.models as models
-                try:
-                    weights = models.MobileNet_V3_Small_Weights.DEFAULT
-                    base_model = models.mobilenet_v3_small(weights=weights)
-                except Exception:
-                    base_model = models.mobilenet_v3_small(pretrained=True)
-                    
-                feats = base_model.features
-                self.stage1 = feats[0:3]   # Stage 1 Exit (24 channels)
-                self.stage2 = feats[3:8]   # Stage 2 Exit (48 channels)
-                self.stage3 = feats[8:13]  # Stage 3 Exit (576 channels)
-                c1, c2, c3 = 24, 48, 576
+                if backbone_type == "large":
+                    try:
+                        weights = models.MobileNet_V3_Large_Weights.DEFAULT
+                        base_model = models.mobilenet_v3_large(weights=weights)
+                    except Exception:
+                        base_model = models.mobilenet_v3_large(pretrained=True)
+                    feats = base_model.features
+                    self.stage1 = feats[0:4]   # Stage 1 Exit (24 channels)
+                    self.stage2 = feats[4:7]   # Stage 2 Exit (40 channels)
+                    self.stage3 = feats[7:16]  # Stage 3 Exit (960 channels)
+                    c1, c2, c3 = 24, 40, 960
+                else:
+                    try:
+                        weights = models.MobileNet_V3_Small_Weights.DEFAULT
+                        base_model = models.mobilenet_v3_small(weights=weights)
+                    except Exception:
+                        base_model = models.mobilenet_v3_small(pretrained=True)
+                    feats = base_model.features
+                    self.stage1 = feats[0:3]   # Stage 1 Exit (24 channels)
+                    self.stage2 = feats[3:8]   # Stage 2 Exit (48 channels)
+                    self.stage3 = feats[8:13]  # Stage 3 Exit (576 channels)
+                    c1, c2, c3 = 24, 48, 576
                 is_pretrained_loaded = True
             except Exception:
                 is_pretrained_loaded = False

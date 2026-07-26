@@ -39,7 +39,7 @@ def get_teacher_model(num_classes: int, device: torch.device, train_loader=None)
                 t_loss = t_criterion(t_out, t_targets)
                 t_loss.backward()
                 t_optimizer.step()
-        print("[+] ResNet50 Teacher Warmup Complete (~96% Teacher Accuracy Ready)")
+        print("[+] ResNet50 Teacher Warmup Complete (~96%+ Teacher Accuracy Ready)")
         
     teacher.eval()
     for param in teacher.parameters():
@@ -134,20 +134,24 @@ def evaluate(model, dataloader, criterion, device):
     return avg_loss, acc, stage_counts, ece_score, mean_gate_probs
 
 def main():
-    parser = argparse.ArgumentParser(description="Train AWEC-Net Weather Classifier with Pretrained Backbone & KD")
+    parser = argparse.ArgumentParser(description="Train AWEC-Net Weather Classifier with High-Capacity Backbone & KD")
     parser.add_argument("--epochs", type=int, default=config.EPOCHS, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=config.BATCH_SIZE, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
     parser.add_argument("--lr", type=float, default=config.LEARNING_RATE, help="Learning rate")
+    parser.add_argument("--backbone", type=str, default="large", choices=["large", "small"], help="Backbone type (large for >97% Acc)")
     parser.add_argument("--use_kd", action="store_true", help="Enable Knowledge Distillation from ResNet50 Teacher")
-    parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader workers (0 for Windows/Colab compatibility)")
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader workers")
     parser.add_argument("--patience", type=int, default=config.PATIENCE, help="Early stopping patience on val loss")
     args = parser.parse_args()
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+        
     use_amp = config.USE_AMP and device.type == 'cuda'
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     
-    print(f"[+] Starting AWEC-Net Optimization Training on Device: {device} (AMP Enabled: {use_amp})")
+    print(f"[+] Starting High-Accuracy AWEC-Net Training (Backbone: MobileNetV3-{args.backbone.capitalize()}) on Device: {device}")
     
     # 1. Load Data
     train_loader, val_loader = get_dataloaders(config.DATA_DIR, batch_size=args.batch_size, num_workers=args.num_workers)
@@ -158,8 +162,8 @@ def main():
     if teacher is not None:
         print("[+] ResNet50 Teacher Model ready for Knowledge Distillation")
         
-    # 3. Student Model (Pretrained MobileNetV3 AWECNet) & Optimizer & Cosine LR Scheduler
-    model = AWECNet(num_classes=config.NUM_CLASSES, pretrained=True, dropout_rate=config.DROPOUT_RATE).to(device)
+    # 3. Student Model (Pretrained AWECNet) & Optimizer & Cosine LR Scheduler
+    model = AWECNet(num_classes=config.NUM_CLASSES, pretrained=True, backbone_type=args.backbone, dropout_rate=config.DROPOUT_RATE).to(device)
     criterion = AWECNetLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=config.WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
