@@ -13,26 +13,26 @@ class Config:
     LOG_DIR: str = "./logs"
     
     # Model Architecture Config
-    BACKBONE_NAME: str = "mobilenetv3_small"
+    BACKBONE_NAME: str = "resnet34"
     GATE_HIDDEN_DIM: int = 64
-    STAGE_CHANNELS: Tuple[int, int, int] = (16, 48, 96)
+    STAGE_CHANNELS: Tuple[int, int, int] = (64, 256, 512)
     
     # Adaptive Thresholds & Dynamic Routing Config
     EXIT_THRESHOLDS: Tuple[float, float] = (0.85, 0.90)
-    COMPLEXITY_BOUNDS: Tuple[float, float] = (0.25, 0.70)  # Low: <0.25, Mid: 0.25-0.70, High: >0.70
-    LAMBDA_ROUTE_WEIGHT: float = 0.40  # Routing alignment loss weight
-    COMPLEXITY_PENALTY_WEIGHT: float = 0.20  # Lambda factor in dual-objective loss
+    COMPLEXITY_BOUNDS: Tuple[float, float] = (0.35, 0.65)  # Balanced Low/Mid/High split
+    LAMBDA_ROUTE_WEIGHT: float = 0.20   # Reduced to let classification lead
+    COMPLEXITY_PENALTY_WEIGHT: float = 0.10
     
     # Training & Regularization Config
-    BATCH_SIZE: int = 32
+    BATCH_SIZE: int = 64
     NUM_WORKERS: int = 0
-    EPOCHS: int = 30
-    LEARNING_RATE: float = 1e-3
-    WEIGHT_DECAY: float = 1e-3  # Increased weight decay to combat overfitting
-    DROPOUT_RATE: float = 0.3   # Increased dropout rate for classifier heads & backbone
-    PATIENCE: int = 6           # Early stopping patience on validation loss
-    TEMPERATURE: float = 1.0    # Gumbel-softmax initial temperature
-    USE_AMP: bool = True        # Automatic Mixed Precision for faster GPU training
+    EPOCHS: int = 20
+    LEARNING_RATE: float = 5e-4          # Lower LR for ResNet34 fine-tuning
+    WEIGHT_DECAY: float = 1e-4           # Reduced weight decay to allow faster learning
+    DROPOUT_RATE: float = 0.2            # Lighter dropout for 512-ch heads
+    PATIENCE: int = 7                    # Early stopping patience
+    TEMPERATURE: float = 1.0             # Gumbel-softmax initial temperature
+    USE_AMP: bool = True                 # Automatic Mixed Precision for faster GPU training
     
     def __post_init__(self):
         if self.CLASSES is None:

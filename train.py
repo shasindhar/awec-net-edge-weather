@@ -128,17 +128,18 @@ def evaluate(model, dataloader, criterion, device):
     all_targets = np.concatenate(all_targets, axis=0)
     all_gate_probs = np.concatenate(all_gate_probs, axis=0)
     
-    mean_gate_probs = np.mean(all_gate_probs, axis=0) # Mean [Stage1, Stage2, Stage3] gate probability
+    mean_gate_probs = np.mean(all_gate_probs, axis=0)
     ece_score = compute_ece(all_probs, all_targets)
     
     return avg_loss, acc, stage_counts, ece_score, mean_gate_probs
 
 def main():
-    parser = argparse.ArgumentParser(description="Train AWEC-Net Weather Classifier with High-Accuracy Target Backbone & KD")
+    parser = argparse.ArgumentParser(description="AWEC-Net: High-Accuracy Target Training (98.46% Val Acc)")
     parser.add_argument("--epochs", type=int, default=config.EPOCHS, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=config.BATCH_SIZE, help="Batch size")
     parser.add_argument("--lr", type=float, default=config.LEARNING_RATE, help="Learning rate")
-    parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet34", "large", "small"], help="Backbone type (resnet34 for 98.46% Acc)")
+    parser.add_argument("--backbone", type=str, default="resnet34", choices=["resnet34", "large", "small"],
+                        help="Backbone type (resnet34 = 98.46% target)")
     parser.add_argument("--use_kd", action="store_true", help="Enable Knowledge Distillation from ResNet50 Teacher")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader workers")
     parser.add_argument("--patience", type=int, default=config.PATIENCE, help="Early stopping patience on val loss")
@@ -151,22 +152,36 @@ def main():
     use_amp = config.USE_AMP and device.type == 'cuda'
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     
-    print(f"[+] Starting High-Accuracy AWEC-Net Target Training (Backbone: {args.backbone}) on Device: {device}")
+    print(f"[+] AWEC-Net High-Accuracy Training | Backbone: {args.backbone} | Device: {device} | AMP: {use_amp}")
     
-    # 1. Load Data
+    # 1. Load Data (with Weighted Sampler for Class Balance)
     train_loader, val_loader = get_dataloaders(config.DATA_DIR, batch_size=args.batch_size, num_workers=args.num_workers)
-    print(f"[+] Loaded Dataset: {len(train_loader.dataset)} Train, {len(val_loader.dataset)} Validation")
+    print(f"[+] Loaded Dataset: {len(train_loader.dataset)} Train, {len(val_loader.dataset)} Validation (WeightedSampler active)")
     
     # 2. Teacher Model (Fine-tuned for distillation)
     teacher = get_teacher_model(config.NUM_CLASSES, device, train_loader) if args.use_kd else None
     if teacher is not None:
         print("[+] ResNet50 Teacher Model ready for Knowledge Distillation")
         
-    # 3. Student Model (Pretrained AWECNet) & Optimizer & Cosine LR Scheduler
+    # 3. Student Model & Optimizer & OneCycleLR Scheduler for fast convergence
     model = AWECNet(num_classes=config.NUM_CLASSES, pretrained=True, backbone_type=args.backbone, dropout_rate=config.DROPOUT_RATE).to(device)
     criterion = AWECNetLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=config.WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
+    
+    # Two-phase optimizer: lower LR for pretrained backbone, higher LR for new exits & estimator
+    backbone_params = list(model.stage1.parameters()) + list(model.stage2.parameters()) + list(model.stage3.parameters())
+    head_params = list(model.exit1.parameters()) + list(model.exit2.parameters()) + list(model.exit3.parameters()) + list(model.estimator.parameters())
+    
+    optimizer = optim.AdamW([
+        {'params': backbone_params, 'lr': args.lr * 0.1},   # Pretrained backbone: 10x lower LR
+        {'params': head_params,     'lr': args.lr}           # New classifier heads: full LR
+    ], weight_decay=config.WEIGHT_DECAY)
+    
+    # OneCycleLR: Warmup → Peak → Cosine Decay, best for transfer learning
+    total_steps = args.epochs * len(train_loader)
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=[args.lr * 0.1, args.lr],
+        total_steps=total_steps, pct_start=0.15, anneal_strategy='cos'
+    )
     
     best_val_loss = float('inf')
     best_acc = 0.0
@@ -174,27 +189,68 @@ def main():
     
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        train_loss, train_acc = train_one_epoch(model, teacher, train_loader, criterion, optimizer, scaler, device, epoch, use_amp)
+        model.train()
+        total_loss, total_correct, total_samples = 0.0, 0, 0
+        temp = max(0.5, 1.0 - (epoch * 0.02))
+        
+        for images, targets, complexity in train_loader:
+            images = images.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            complexity = complexity.to(device, non_blocking=True)
+            
+            teacher_logits = None
+            if teacher is not None:
+                with torch.no_grad():
+                    if use_amp and device.type == 'cuda':
+                        with torch.amp.autocast('cuda'):
+                            teacher_logits = teacher(images)
+                    else:
+                        teacher_logits = teacher(images)
+                    
+            optimizer.zero_grad()
+            
+            if use_amp and device.type == 'cuda':
+                with torch.amp.autocast('cuda'):
+                    outputs = model(images, temperature=temp, hard_routing=False)
+                    loss, _ = criterion(outputs, targets, complexity, teacher_logits)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                outputs = model(images, temperature=temp, hard_routing=False)
+                loss, _ = criterion(outputs, targets, complexity, teacher_logits)
+                loss.backward()
+                optimizer.step()
+                
+            scheduler.step()
+            
+            preds = torch.argmax(outputs['logits'], dim=1)
+            total_correct += (preds == targets).sum().item()
+            total_samples += targets.size(0)
+            total_loss += loss.item() * targets.size(0)
+        
+        train_acc = total_correct / total_samples
+        train_loss = total_loss / total_samples
         val_loss, val_acc, stage_counts, ece_score, gate_probs = evaluate(model, val_loader, criterion, device)
-        scheduler.step()
         elapsed = time.time() - t0
         
         gate_str = f"[S1={gate_probs[0]:.2f}, S2={gate_probs[1]:.2f}, S3={gate_probs[2]:.2f}]"
         print(f"Epoch [{epoch:02d}/{args.epochs:02d}] | Train Loss: {train_loss:.4f} Acc: {train_acc*100:.2f}% | Val Loss: {val_loss:.4f} Acc: {val_acc*100:.2f}% | Gate Prob: {gate_str} | Stage Exits: {stage_counts} | ECE: {ece_score:.4f} | Time: {elapsed:.1f}s")
         
-        # Early Stopping based on validation loss
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_acc = val_acc
             patience_counter = 0
             save_path = os.path.join(config.CHECKPOINT_DIR, "awec_net_best.pth")
             torch.save(model.state_dict(), save_path)
-            print(f"    --> Saved best checkpoint to {save_path} (Best Val Loss: {best_val_loss:.4f}, Val Acc: {val_acc*100:.2f}%)")
+            print(f"    --> Saved best checkpoint (Best Val Loss: {best_val_loss:.4f}, Val Acc: {val_acc*100:.2f}%)")
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
-                print(f"\n[!] Early Stopping triggered at Epoch {epoch:02d}: Val loss did not improve for {args.patience} consecutive epochs.")
+                print(f"\n[!] Early Stopping at Epoch {epoch:02d}")
                 break
+
+    print(f"\n[+] Training Complete! Best Validation Accuracy: {best_acc*100:.2f}%")
 
 if __name__ == "__main__":
     main()

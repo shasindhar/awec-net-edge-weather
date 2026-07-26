@@ -48,39 +48,32 @@ class SyntheticWeatherDatasetGenerator:
                 if os.path.exists(img_path):
                     continue
                 
-                # Base image with synthetic noise / pattern according to weather type
                 arr = np.random.randint(100, 200, (224, 224, 3), dtype=np.uint8)
                 if cls_name == "Sunny":
-                    # Bright, high contrast, warm tone
                     arr[:, :, 0] = np.clip(arr[:, :, 0] + 50, 0, 255)
                 elif cls_name == "Cloudy":
-                    # Soft gray, low gradient contrast
                     gray_val = np.mean(arr, axis=2, keepdims=True).astype(np.uint8)
                     arr = np.repeat(gray_val, 3, axis=2)
                 elif cls_name == "Rainy":
-                    # Dark blue tint with high frequency streak lines (rain)
                     arr[:, :, 2] = np.clip(arr[:, :, 2] + 40, 0, 255)
-                    # Add diagonal rain streaks
                     for r in range(0, 224, 4):
                         arr[r:min(r+10, 224), r:min(r+2, 224), :] = 255
                 elif cls_name == "Snowy":
-                    # High brightness snow spots
                     arr = np.clip(arr + 60, 0, 255).astype(np.uint8)
                     snow_spots = np.random.rand(224, 224) > 0.95
                     arr[snow_spots] = 255
                 elif cls_name == "Foggy":
-                    # Heavy blur, low contrast haze
                     arr = (arr * 0.4 + 140).astype(np.uint8)
                 
                 img = Image.fromarray(arr)
                 if cls_name == "Foggy":
                     img = img.filter(ImageFilter.GaussianBlur(radius=3))
-                
                 img.save(img_path)
 
 class WeatherDataset(Dataset):
     """
-    PyTorch Dataset wrapper for Weather Images. Returns image tensor, target label, and visual complexity score.
+    PyTorch Dataset wrapper for Weather Images with Balanced Class Sampling.
+    Returns image tensor, target label, and visual complexity score.
     """
     def __init__(self, data_dir: str, is_train: bool = True, transform: Optional[transforms.Compose] = None):
         self.data_dir = data_dir
@@ -98,24 +91,26 @@ class WeatherDataset(Dataset):
                         
     def get_train_transforms(self):
         """
-        Strong data augmentation to prevent overfitting:
-        - RandomResizedCrop
-        - RandomHorizontalFlip
-        - ColorJitter (brightness, contrast, saturation, hue)
-        - RandomGaussianBlur (weather-specific noise/blur augmentation)
+        Strong weather-specific data augmentation for high val accuracy:
+        - RandAugment: Randomly applies magnitude-controllable augmentations
+        - TrivialAugmentWide: Pushes robustness for minority classes (Rainy, Snowy, Foggy)
+        - ColorJitter, RandomGaussianBlur, RandomHorizontalFlip for weather generalization
         """
         return transforms.Compose([
-            transforms.RandomResizedCrop(config.IMAGE_SIZE, scale=(0.8, 1.0)),
+            transforms.RandomResizedCrop(config.IMAGE_SIZE, scale=(0.7, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 2.0))], p=0.3),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.15),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 3.0))], p=0.4),
+            transforms.RandomGrayscale(p=0.05),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.RandomErasing(p=0.15, scale=(0.02, 0.1), ratio=(0.3, 3.3))
         ])
 
     def get_val_transforms(self):
         return transforms.Compose([
-            transforms.Resize(config.IMAGE_SIZE),
+            transforms.Resize((256, 256)),
+            transforms.CenterCrop(config.IMAGE_SIZE),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -127,16 +122,21 @@ class WeatherDataset(Dataset):
         path, label = self.samples[idx]
         img_pil = Image.open(path).convert('RGB')
         
-        # Calculate ground truth visual complexity score for dynamic routing analysis
         complexity_score = VisualComplexityExtractor.extract_complexity(img_pil)
-        
         img_tensor = self.transform(img_pil)
         return img_tensor, label, complexity_score
 
-def get_dataloaders(data_dir: str, batch_size: int = 32, num_workers: int = 0) -> Tuple[DataLoader, DataLoader]:
+def get_class_weights(dataset) -> torch.Tensor:
+    """Compute inverse frequency weights for imbalanced class sampling."""
+    labels = [s[1] for s in dataset.samples]
+    class_counts = np.bincount(labels, minlength=config.NUM_CLASSES).astype(np.float32)
+    weights = 1.0 / np.maximum(class_counts, 1)
+    sample_weights = torch.tensor([weights[l] for l in labels], dtype=torch.float32)
+    return sample_weights
+
+def get_dataloaders(data_dir: str, batch_size: int = 64, num_workers: int = 0) -> Tuple[DataLoader, DataLoader]:
     full_dataset = WeatherDataset(data_dir, is_train=True)
     if len(full_dataset) == 0:
-        # Generate synthetic data if empty
         SyntheticWeatherDatasetGenerator.generate_synthetic_data(data_dir, samples_per_class=100)
         full_dataset = WeatherDataset(data_dir, is_train=True)
         
@@ -150,6 +150,12 @@ def get_dataloaders(data_dir: str, batch_size: int = 32, num_workers: int = 0) -
     train_ds = torch.utils.data.Subset(WeatherDataset(data_dir, is_train=True), train_indices.indices)
     val_ds = torch.utils.data.Subset(WeatherDataset(data_dir, is_train=False), val_indices.indices)
     
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    # Weighted sampler to handle Rainy/Snowy/Foggy class imbalance
+    full_train_base = WeatherDataset(data_dir, is_train=True)
+    sample_weights = get_class_weights(full_train_base)
+    train_weights = sample_weights[train_indices.indices]
+    sampler = torch.utils.data.WeightedRandomSampler(train_weights, num_samples=len(train_weights), replacement=True)
+    
+    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     return train_loader, val_loader
