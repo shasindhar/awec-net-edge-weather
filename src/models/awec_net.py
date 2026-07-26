@@ -50,10 +50,9 @@ class AWECNet(nn.Module):
                     except Exception:
                         base_model = models.mobilenet_v3_large(pretrained=True)
                     feats = base_model.features
-                    self.stage1 = feats[0:4]   # Stage 1 Exit (24 channels)
-                    self.stage2 = feats[4:7]   # Stage 2 Exit (40 channels)
-                    self.stage3 = feats[7:16]  # Stage 3 Exit (960 channels)
-                    c1, c2, c3 = 24, 40, 960
+                    self.stage1 = feats[0:4]   # Stage 1 (24 channels)
+                    self.stage2 = feats[4:7]   # Stage 2 (40 channels)
+                    self.stage3 = feats[7:]    # Stage 3 (960 channels)
                 else:
                     try:
                         weights = models.MobileNet_V3_Small_Weights.DEFAULT
@@ -61,43 +60,52 @@ class AWECNet(nn.Module):
                     except Exception:
                         base_model = models.mobilenet_v3_small(pretrained=True)
                     feats = base_model.features
-                    self.stage1 = feats[0:3]   # Stage 1 Exit (24 channels)
-                    self.stage2 = feats[3:8]   # Stage 2 Exit (48 channels)
-                    self.stage3 = feats[8:13]  # Stage 3 Exit (576 channels)
-                    c1, c2, c3 = 24, 48, 576
+                    self.stage1 = feats[0:3]   # Stage 1 (24 channels)
+                    self.stage2 = feats[3:8]   # Stage 2 (48 channels)
+                    self.stage3 = feats[8:]    # Stage 3 (576 channels)
                 is_pretrained_loaded = True
             except Exception:
                 is_pretrained_loaded = False
 
         if not is_pretrained_loaded:
-            c1, c2, c3 = (24, 48, 96)
+            c1_fallback, c2_fallback, c3_fallback = (24, 48, 96)
             self.stage1 = nn.Sequential(
-                nn.Conv2d(3, c1, kernel_size=3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(c1),
+                nn.Conv2d(3, c1_fallback, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(c1_fallback),
                 nn.Hardswish(inplace=True),
-                nn.Conv2d(c1, c1, kernel_size=3, stride=2, padding=1, groups=c1, bias=False),
-                nn.BatchNorm2d(c1),
+                nn.Conv2d(c1_fallback, c1_fallback, kernel_size=3, stride=2, padding=1, groups=c1_fallback, bias=False),
+                nn.BatchNorm2d(c1_fallback),
                 nn.Hardswish(inplace=True),
                 nn.Dropout2d(0.1)
             )
             self.stage2 = nn.Sequential(
-                nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(c2),
+                nn.Conv2d(c1_fallback, c2_fallback, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(c2_fallback),
                 nn.Hardswish(inplace=True),
-                nn.Conv2d(c2, c2, kernel_size=3, stride=1, padding=1, groups=c2, bias=False),
-                nn.BatchNorm2d(c2),
+                nn.Conv2d(c2_fallback, c2_fallback, kernel_size=3, stride=1, padding=1, groups=c2_fallback, bias=False),
+                nn.BatchNorm2d(c2_fallback),
                 nn.Hardswish(inplace=True),
                 nn.Dropout2d(0.15)
             )
             self.stage3 = nn.Sequential(
-                nn.Conv2d(c2, c3, kernel_size=3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(c3),
+                nn.Conv2d(c2_fallback, c3_fallback, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(c3_fallback),
                 nn.Hardswish(inplace=True),
-                nn.Conv2d(c3, c3, kernel_size=3, stride=1, padding=1, groups=c3, bias=False),
-                nn.BatchNorm2d(c3),
+                nn.Conv2d(c3_fallback, c3_fallback, kernel_size=3, stride=1, padding=1, groups=c3_fallback, bias=False),
+                nn.BatchNorm2d(c3_fallback),
                 nn.Hardswish(inplace=True),
                 nn.Dropout2d(0.2)
             )
+
+        # Dynamic channel shape detection to guarantee 100% mat1 / mat2 dimension matching
+        with torch.no_grad():
+            dummy = torch.randn(1, 3, 224, 224)
+            f1 = self.stage1(dummy)
+            c1 = f1.size(1)
+            f2 = self.stage2(f1)
+            c2 = f2.size(1)
+            f3 = self.stage3(f2)
+            c3 = f3.size(1)
             
         self.exit1 = EarlyExitClassifier(c1, num_classes, dropout_rate=dropout_rate)
         self.exit2 = EarlyExitClassifier(c2, num_classes, dropout_rate=dropout_rate)
