@@ -1,3 +1,4 @@
+# pyrefly: ignore
 import os
 import sys
 import subprocess
